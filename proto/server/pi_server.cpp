@@ -633,10 +633,14 @@ int PIGrpcServerPipelineConfigSet(uint64_t dev_id, const char *config_bin, size_
     auto status = device_mgr->pipeline_config_set(
             p4v1::SetForwardingPipelineConfigRequest_Action_VERIFY_AND_COMMIT,
             config);
+
     config.release_p4info();
     config.release_p4_device_config();
 
-    // FIXME: return error if status is not OK
+    if (status.code() != ::google::rpc::Code::OK) {
+        return PI_STATUS_INVALID_CONFIG_TYPE;
+    }
+
     return PI_STATUS_SUCCESS;
 }
 
