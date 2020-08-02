@@ -618,7 +618,8 @@ void PIGrpcServerInitWithConfig(const char *config_text, const char *version) {
   assert(status.code() == ::google::rpc::Code::OK);
 }
 
-pi_status_t PIGrpcServerPipelineConfigSet(uint64_t dev_id, const char *config_bin, size_t data_size, pi_p4info_t *p4info) {
+int PIGrpcServerPipelineConfigSet(uint64_t dev_id, const char *config_bin, size_t data_size, void *p) {
+    pi_p4info_t *p4info = (pi_p4info_t *) p;
     auto device = ::pi::server::Devices::get(dev_id);
 
     ::p4::config::v1::P4Info p4info_proto;
