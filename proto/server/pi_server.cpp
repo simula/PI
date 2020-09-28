@@ -19,7 +19,6 @@
  */
 
 #include <PI/frontends/proto/device_mgr.h>
-#include <PI/p4info.h>
 
 #include <grpc++/grpc++.h>
 // #include <grpc++/support/error_details.h>
@@ -618,12 +617,11 @@ void PIGrpcServerInitWithConfig(const char *config_text, const char *version) {
   assert(status.code() == ::google::rpc::Code::OK);
 }
 
-int PIGrpcServerPipelineConfigSet(uint64_t dev_id, const char *config_bin, size_t data_size, void *p) {
-    pi_p4info_t *p4info = (pi_p4info_t *) p;
+int PIGrpcServerPipelineConfigSet(uint64_t dev_id, const char *config_bin, size_t data_size, void *p4info) {
     auto device = ::pi::server::Devices::get(dev_id);
 
     ::p4::config::v1::P4Info p4info_proto;
-    p4info_proto = ::pi::p4info::p4info_serialize_to_proto(p4info);
+    p4info_proto = ::pi::p4info::p4info_serialize_to_proto((pi_p4info_t*) p4info);
 
     p4v1::ForwardingPipelineConfig config;
     config.set_allocated_p4info(&p4info_proto);
