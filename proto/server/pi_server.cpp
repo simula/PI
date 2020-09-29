@@ -41,7 +41,7 @@
 
 #include "PI/proto/pi_server.h"
 #include "PI/proto/p4info_to_and_from_proto.h"
-
+//
 #include "p4/tmp/p4config.grpc.pb.h"
 
 using grpc::Server;
@@ -618,6 +618,8 @@ void PIGrpcServerInitWithConfig(const char *config_text, const char *version) {
 }
 
 int PIGrpcServerPipelineConfigSet(uint64_t dev_id, const char *config_bin, size_t data_size, void *p4info) {
+
+
     auto device = ::pi::server::Devices::get(dev_id);
 
     ::p4::config::v1::P4Info p4info_proto;
