@@ -31,8 +31,10 @@ nobase_include_HEADERS = PI/proto/pi_server.h
 
 libpigrpcserver_la_LIBADD = \
 $(top_builddir)/frontend/libpifeproto.la \
+$(top_builddir)/p4info/libpiconvertproto.la \
 $(top_builddir)/libpiprotogrpc.la \
 $(top_builddir)/libpiprotobuf.la \
+$(top_builddir)/../src/libpip4info.la \
 $(PROTOBUF_LIBS) $(GRPC_LIBS)
 # causes issue with libpiproto as it includes a version of google.rpc.Status
 # -lgrpc++_error_details
