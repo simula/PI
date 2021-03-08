@@ -1,0 +1,25 @@
+#!/usr/bin/make -f
+
+DH_VERBOSE = 1
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	cd $(CURDIR)/third_party/googletest/tmp && mv ./* ../ && cd ../ && rm -rf $(CURDIR)/third_party/googletest/tmp ;
+	cd $(CURDIR)/proto/openconfig/gnmi/tmp && mv ./* ../ && cd ../ && rm -rf $(CURDIR)/proto/openconfig/gnmi/tmp ;
+	cd $(CURDIR)/proto/openconfig/public/tmp && mv ./* ../ && cd ../ && rm -rf  $(CURDIR)/proto/openconfig/public/tmp ;
+	cd $(CURDIR)/proto/p4runtime/tmp/ && mv ./* ../ && cd ../ && rm -rf $(CURDIR)/proto/p4runtime/tmp
+	./autogen.sh
+	./configure --with-proto --without-internal-rpc --without-cli --without-bmv2 --without-sysrepo --prefix=/usr
+
+override_dh_auto_build:
+	make all
+
+override_dh_auto_install:
+	dh_auto_install -- DESTDIR=$(CURDIR)/ install
+	-find $(CURDIR)/usr/lib/python2.7/dist-packages/ -name "*.pyc" -delete 
+	-find $(CURDIR)/usr/lib/python2.7/dist-packages/ -name "*.pyo" -delete 
+	-find $(CURDIR)/usr/lib/python3.8/dist-packages/ -name "*.pyc" -delete 
+	-find $(CURDIR)/usr/lib/python3.8/dist-packages/ -name "*.pyo" -delete 
+

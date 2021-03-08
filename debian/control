@@ -1,0 +1,52 @@
+Source: p4lang-pi
+Section: devel
+Priority: optional
+Maintainer: Thomas Dreibholz <dreibh@simula.no>
+Build-Depends: autoconf,
+               automake,
+               debhelper (>= 9),
+               libboost-dev,
+               libboost-system-dev,
+               libboost-thread-dev,
+               libgrpc++-dev,
+               libgrpc-dev,
+               libjudy-dev,
+               libprotobuf-dev,
+               libprotoc-dev,
+               libtool,
+               pkg-config,
+               protobuf-compiler,
+               protobuf-compiler-grpc
+Standards-Version: 4.5.1.0
+Rules-Requires-Root: no
+Homepage: https://github.com/osinstom/PI
+Vcs-Git: https://github.com/simula/PI
+Vcs-Browser: https://github.com/simula/PI/tree/p4-packaging
+
+Package: p4lang-pi
+Architecture: any
+Depends: libboost-dev,
+         libboost-system-dev,
+         libboost-thread-dev,
+         libgrpc++-dev,
+         libgrpc-dev,
+         libjudy-dev,
+         libprotobuf-dev,
+         libprotobuf-java,
+         libprotoc-dev,
+         protobuf-compiler,
+         protobuf-compiler-grpc,
+         ${misc:Depends},
+         ${shlibs:Depends}
+Description: Implementation framework of a P4Runtime server
+ Protocol Independent API (PI or P4 Runtime) defines a set of APIs that allow
+ interacting with entities defined in a P4 program.
+ These include: tables, counters, meters ...
+ .
+ PI APIs are defined at the level of properties that can be effected.
+ Examples include adding and deleting table entries. They are
+ independent from the actual
+ instance of the controlled object (and thus the name) which is passed
+ as a parameter to the API.
+ .
+ This is the p4lang pi software
