@@ -1,25 +1,19 @@
 #!/usr/bin/make -f
 
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
 DH_VERBOSE = 1
 
 %:
-	dh $@
+	dh $@ --parallel
 
 override_dh_auto_configure:
-	cd $(CURDIR)/third_party/googletest/tmp && mv ./* ../ && cd ../ && rm -rf $(CURDIR)/third_party/googletest/tmp ;
-	cd $(CURDIR)/proto/openconfig/gnmi/tmp && mv ./* ../ && cd ../ && rm -rf $(CURDIR)/proto/openconfig/gnmi/tmp ;
-	cd $(CURDIR)/proto/openconfig/public/tmp && mv ./* ../ && cd ../ && rm -rf  $(CURDIR)/proto/openconfig/public/tmp ;
-	cd $(CURDIR)/proto/p4runtime/tmp/ && mv ./* ../ && cd ../ && rm -rf $(CURDIR)/proto/p4runtime/tmp
-	./autogen.sh
-	./configure --with-proto --without-internal-rpc --without-cli --without-bmv2 --without-sysrepo --prefix=/usr
+	dh_auto_configure -- --with-proto --with-fe-cpp --with-cli --with-internal-rpc --with-gnu-ld --with-bmv2 --includedir=/usr/include/c++/10
 
 override_dh_auto_build:
-	make all
+	$(MAKE) all
 
 override_dh_auto_install:
-	dh_auto_install -- DESTDIR=$(CURDIR)/ install
-	-find $(CURDIR)/usr/lib/python2.7/dist-packages/ -name "*.pyc" -delete 
-	-find $(CURDIR)/usr/lib/python2.7/dist-packages/ -name "*.pyo" -delete 
-	-find $(CURDIR)/usr/lib/python3.8/dist-packages/ -name "*.pyc" -delete 
-	-find $(CURDIR)/usr/lib/python3.8/dist-packages/ -name "*.pyo" -delete 
-
+	dh_auto_install -- DESTDIR=$(CURDIR)/debian/tmp install
+	find $(CURDIR)/debian/tmp/usr/lib/python3.8/dist-packages/ -name "*.pyc" -delete
+	find $(CURDIR)/debian/tmp/usr/lib/python3.8/dist-packages/ -name "*.pyo" -delete

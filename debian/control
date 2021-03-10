@@ -4,19 +4,25 @@ Priority: optional
 Maintainer: Thomas Dreibholz <dreibh@simula.no>
 Build-Depends: autoconf,
                automake,
-               debhelper (>= 9),
+               bm,
+               debhelper (>= 12),
                libboost-dev,
                libboost-system-dev,
                libboost-thread-dev,
                libgrpc++-dev,
                libgrpc-dev,
                libjudy-dev,
+               libnanomsg-dev,
                libprotobuf-dev,
                libprotoc-dev,
+               libreadline-dev,
                libtool,
+               libtool-bin,
                pkg-config,
                protobuf-compiler,
-               protobuf-compiler-grpc
+               protobuf-compiler-grpc,
+               python2,
+               valgrind
 Standards-Version: 4.5.1.0
 Rules-Requires-Root: no
 Homepage: https://github.com/osinstom/PI
@@ -25,7 +31,8 @@ Vcs-Browser: https://github.com/simula/PI/tree/p4-packaging
 
 Package: p4lang-pi
 Architecture: any
-Depends: libboost-dev,
+Depends: bm,
+         libboost-dev,
          libboost-system-dev,
          libboost-thread-dev,
          libgrpc++-dev,
