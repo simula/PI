@@ -6,6 +6,7 @@ Build-Depends: autoconf,
                automake,
                bm,
                debhelper (>= 12),
+               dh-python,
                libboost-dev,
                libboost-system-dev,
                libboost-thread-dev,
@@ -22,6 +23,7 @@ Build-Depends: autoconf,
                protobuf-compiler,
                protobuf-compiler-grpc,
                python2,
+               python3-all,
                valgrind
 Standards-Version: 4.5.1.0
 Rules-Requires-Root: no
