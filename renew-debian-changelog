@@ -28,7 +28,7 @@ GIT_VERSION="git`env LANG=en date -u +"%Y%m%d%H%M%S"`"
 GIT_ID="${GIT_VERSION}~`cat .git/ORIG_HEAD | cut -b 1-8`"   # Name may not be too long! Just take 8 digits ...
 
 # ------ Change configure.ac ------------------------------------------------
-sed "s#AC_INIT(\[[A-Z0-9-]*\],.*,#AC_INIT([p4lang-pi], [${PACKAGE_VERSION}+$GIT_ID],#g" <configure.ac >configure.ac.new
+sed "s#AC_INIT(\[[a-zA-Z0-9-]*\],.*,#AC_INIT([p4lang-pi], [${PACKAGE_VERSION}+$GIT_ID],#g" <configure.ac >configure.ac.new
 
 # ------ Create debian/changelog --------------------------------------------
 (
