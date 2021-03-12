@@ -8,7 +8,7 @@ DH_VERBOSE = 1
 	dh $@ --parallel
 
 override_dh_auto_configure:
-	dh_auto_configure -- --with-proto --with-fe-cpp --with-cli --with-internal-rpc --with-gnu-ld --with-bmv2 --includedir=/usr/include/c++/10
+	dh_auto_configure -- --with-proto --with-fe-cpp --with-cli --with-internal-rpc --with-gnu-ld --with-bmv2
 
 override_dh_auto_build:
 	$(MAKE) all
