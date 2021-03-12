@@ -32,7 +32,7 @@ Vcs-Git: https://github.com/simula/PI
 Vcs-Browser: https://github.com/simula/PI/tree/p4-packaging
 
 Package: p4lang-pi
-Architecture: any
+Architecture: amd64 arm64
 Depends: libboost-dev,
          libboost-system-dev,
          libboost-thread-dev,
