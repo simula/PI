@@ -2,7 +2,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.68])
-AC_INIT([p4lang-pi], [0.1.0+git20210312193426~01457508], [antonin@barefootnetworks.com])
+AC_INIT([p4lang-pi], [0.1.0+git20210316131726~35198b25], [antonin@barefootnetworks.com])
 AC_CONFIG_AUX_DIR([.])
 AM_INIT_AUTOMAKE([1.9 tar-pax foreign subdir-objects])
 AC_CONFIG_HEADERS([config.h])
