@@ -1,5 +1,5 @@
-p4lang-pi (0.1.0+git20210323200938~dc97ebcc-1ppa1) unstable; urgency=medium
+p4lang-pi (0.1.0+g202103242050~827907-1ppa1) unstable; urgency=medium
 
   * Self-made package
 
- -- Thomas Dreibholz <dreibh@iem.uni-due.de>  Tue, 23 Mar 2021 21:09:38 +0100
+ -- Thomas Dreibholz <dreibh@iem.uni-due.de>  Wed, 24 Mar 2021 21:50:24 +0100
