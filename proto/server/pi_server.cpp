@@ -20,8 +20,8 @@
 
 #include <PI/frontends/proto/device_mgr.h>
 
-#include <grpc++/grpc++.h>
-// #include <grpc++/support/error_details.h>
+#include <grpcpp/grpcpp.h>
+// #include <grpcpp/support/error_details.h>
 
 #include <memory>
 #include <set>
@@ -37,6 +37,7 @@
 #include "p4/v1/p4runtime.grpc.pb.h"
 #include "pi_server_testing.h"
 #include "server_config/server_config.h"
+#include "shared_mutex.h"
 #include "uint128.h"
 
 #include "PI/proto/pi_server.h"
@@ -63,7 +64,7 @@ namespace server {
 
 namespace {
 
-constexpr char p4runtime_api_version[] = "1.2.0-dev";
+constexpr char p4runtime_api_version[] = "1.3.0";
 
 // Copied from
 // https://github.com/grpc/grpc/blob/master/src/cpp/util/error_details.cc
@@ -100,8 +101,8 @@ grpc::Status no_pipeline_config_status() {
                       "No forwarding pipeline config set for this device");
 }
 
-grpc::Status not_master_status() {
-  return grpc::Status(grpc::StatusCode::PERMISSION_DENIED, "Not master");
+grpc::Status not_primary_status() {
+  return grpc::Status(grpc::StatusCode::PERMISSION_DENIED, "Not primary");
 }
 
 using StreamChannelReaderWriter = grpc::ServerReaderWriter<
@@ -172,12 +173,12 @@ class DeviceState {
       : device_id(device_id), server_config(default_server_config) { }
 
   DeviceMgr *get_p4_mgr() {
-    std::lock_guard<std::mutex> lock(m);
+    auto lock = shared_lock();
     return device_mgr.get();
   }
 
   DeviceMgr *get_or_add_p4_mgr() {
-    std::lock_guard<std::mutex> lock(m);
+    auto lock = unique_lock();
     if (device_mgr == nullptr) {
       device_mgr.reset(new DeviceMgr(device_id));
       auto status = device_mgr->server_config_set(
@@ -192,7 +193,7 @@ class DeviceState {
 
   Status set_server_config(const p4serverv1::Config &config) {
     server_config.set_config(config);
-    std::lock_guard<std::mutex> lock(m);
+    auto lock = unique_lock();
     if (device_mgr != nullptr) {
       return to_grpc_status(device_mgr->server_config_set(config));
     }
@@ -204,10 +205,11 @@ class DeviceState {
   }
 
   void send_stream_message(p4v1::StreamMessageResponse *msg) {
-    std::lock_guard<std::mutex> lock(m);
-    auto master = get_master();
-    if (master == nullptr) return;
-    auto stream = master->stream();
+    auto lock = shared_lock();
+    auto primary = get_primary();
+    if (primary == nullptr) return;
+    std::lock_guard<std::mutex> packetin_lock(packetin_mutex);
+    auto stream = primary->stream();
     auto success = stream->Write(*msg);
     if (msg->has_packet() && success) {
       SIMPLELOG << "PACKET IN\n";
@@ -216,12 +218,12 @@ class DeviceState {
   }
 
   uint64_t get_pkt_in_count() {
-    std::lock_guard<std::mutex> lock(m);
+    std::lock_guard<std::mutex> packetin_lock(packetin_mutex);
     return pkt_in_count;
   }
 
   Status add_connection(Connection *connection) {
-    std::lock_guard<std::mutex> lock(m);
+    auto lock = unique_lock();
     if (connections.size() >= max_connections)
       return Status(StatusCode::RESOURCE_EXHAUSTED, "Too many connections");
     auto p = connections.insert(connection);
@@ -230,8 +232,8 @@ class DeviceState {
                     "Election id already exists");
     }
     SIMPLELOG << "New connection\n";
-    auto is_master = (p.first == connections.begin());
-    if (is_master)
+    auto is_primary = (p.first == connections.begin());
+    if (is_primary)
       notify_all();
     else
       notify_one(connection);
@@ -240,11 +242,11 @@ class DeviceState {
 
   Status update_connection(Connection *connection,
                            const Uint128 &new_election_id) {
-    std::lock_guard<std::mutex> lock(m);
+    auto lock = unique_lock();
     if (connection->election_id() == new_election_id) return Status::OK;
     auto connection_it = connections.find(connection);
     assert(connection_it != connections.end());
-    auto was_master = (connection_it == connections.begin());
+    auto was_primary = (connection_it == connections.begin());
     connections.erase(connection_it);
     connection->set_election_id(new_election_id);
     auto p = connections.insert(connection);
@@ -252,9 +254,9 @@ class DeviceState {
       return Status(StatusCode::INVALID_ARGUMENT,
                     "New election id already exists");
     }
-    auto is_master = (p.first == connections.begin());
-    auto master_changed = (is_master != was_master);
-    if (master_changed)
+    auto is_primary = (p.first == connections.begin());
+    auto primary_changed = (is_primary != was_primary);
+    if (primary_changed)
       notify_all();
     else
       notify_one(connection);
@@ -262,22 +264,23 @@ class DeviceState {
   }
 
   void cleanup_connection(Connection *connection) {
-    std::lock_guard<std::mutex> lock(m);
+    auto lock = unique_lock();
     auto connection_it = connections.find(connection);
     assert(connection_it != connections.end());
-    auto was_master = (connection_it == connections.begin());
+    auto was_primary = (connection_it == connections.begin());
     connections.erase(connection_it);
     SIMPLELOG << "Connection removed\n";
-    if (was_master) notify_all();
+    if (was_primary) notify_all();
   }
 
   void process_stream_message_request(
       Connection *connection, const p4v1::StreamMessageRequest &request) {
     // these are handled directly by StreamChannel
     assert(request.update_case() != p4v1::StreamMessageRequest::kArbitration);
-    std::lock_guard<std::mutex> lock(m);
-    if (!is_master(connection)) return;
+    auto lock = shared_lock();
+    if (!is_primary(connection)) return;
     if (device_mgr == nullptr) return;
+    std::lock_guard<std::mutex> packetout_lock(packetout_mutex);
     device_mgr->stream_message_request_handle(request);
     if (request.update_case() == p4v1::StreamMessageRequest::kPacket) {
       SIMPLELOG << "PACKET OUT\n";
@@ -286,32 +289,41 @@ class DeviceState {
   }
 
   uint64_t get_pkt_out_count() {
-    std::lock_guard<std::mutex> lock(m);
+    std::lock_guard<std::mutex> packetout_lock(packetout_mutex);
     return pkt_out_count;
   }
 
-  bool is_master(const Uint128 &election_id) const {
-    std::lock_guard<std::mutex> lock(m);
-    auto master = get_master();
-    return (master == nullptr) ? false : (master->election_id() == election_id);
+  bool is_primary(const Uint128 &election_id) const {
+    auto lock = shared_lock();
+    auto primary = get_primary();
+    return (primary == nullptr) ?
+        false : (primary->election_id() == election_id);
   }
 
   size_t connections_size() const {
-    std::lock_guard<std::mutex> lock(m);
+    auto lock = shared_lock();
     return connections.size();
   }
 
  private:
-  Connection *get_master() const {
+  SharedLock shared_lock() const {
+    return ::pi::server::shared_lock(m);
+  }
+
+  UniqueLock unique_lock() const {
+    return ::pi::server::unique_lock(m);
+  }
+
+  Connection *get_primary() const {
     return connections.empty() ? nullptr : *connections.begin();
   }
 
-  bool is_master(const Connection *connection) const {
-    return connection == get_master();
+  bool is_primary(const Connection *connection) const {
+    return connection == get_primary();
   }
 
   void notify_one(const Connection *connection) const {
-    auto is_master = (connection == *connections.begin());
+    auto is_primary = (connection == *connections.begin());
     auto stream = connection->stream();
     p4v1::StreamMessageResponse response;
     auto arbitration = response.mutable_arbitration();
@@ -320,16 +332,16 @@ class DeviceState {
       to->set_high(from.high());
       to->set_low(from.low());
     };
-    auto master_connection = get_master();
-    convert_u128(master_connection->election_id(),
+    auto primary_connection = get_primary();
+    convert_u128(primary_connection->election_id(),
                  arbitration->mutable_election_id());
     auto status = arbitration->mutable_status();
-    if (is_master) {
+    if (is_primary) {
       status->set_code(::google::rpc::Code::OK);
-      status->set_message("Is master");
+      status->set_message("Is primary");
     } else {
       status->set_code(::google::rpc::Code::ALREADY_EXISTS);
-      status->set_message("Is slave");
+      status->set_message("Is backup");
     }
     stream->Write(response);
   }
@@ -340,7 +352,12 @@ class DeviceState {
 
   static p4serverv1::Config default_server_config;
 
-  mutable std::mutex m{};
+  // protects DeviceMgr, connections, ...
+  mutable SharedMutex m{};
+  // protects pkt_in_count and ensures sequential writes on the stream
+  mutable std::mutex packetin_mutex;
+  // protects pkt_out_count
+  mutable std::mutex packetout_mutex;
   uint64_t pkt_in_count{0};
   uint64_t pkt_out_count{0};
   std::unique_ptr<DeviceMgr> device_mgr{nullptr};
@@ -401,10 +418,10 @@ class P4RuntimeServiceImpl : public p4v1::P4Runtime::Service {
     // using grpc_cli, but may need to be changed in production.
     auto num_connections = device->connections_size();
     if (num_connections == 0 && request->has_election_id())
-      return not_master_status();
+      return not_primary_status();
     auto election_id = convert_u128(request->election_id());
-    if (num_connections > 0 && !device->is_master(election_id))
-      return not_master_status();
+    if (num_connections > 0 && !device->is_primary(election_id))
+      return not_primary_status();
     auto device_mgr = device->get_p4_mgr();
     if (device_mgr == nullptr) return no_pipeline_config_status();
     auto status = device_mgr->write(*request);
@@ -436,10 +453,10 @@ class P4RuntimeServiceImpl : public p4v1::P4Runtime::Service {
     // using grpc_cli, but may need to be changed in production.
     auto num_connections = device->connections_size();
     if (num_connections == 0 && request->has_election_id())
-      return not_master_status();
+      return not_primary_status();
     auto election_id = convert_u128(request->election_id());
-    if (num_connections > 0 && !device->is_master(election_id))
-      return not_master_status();
+    if (num_connections > 0 && !device->is_primary(election_id))
+      return not_primary_status();
     auto device_mgr = device->get_or_add_p4_mgr();
     auto status = device_mgr->pipeline_config_set(
         request->action(), request->config());
@@ -675,7 +692,7 @@ void PIGrpcServerRunAddr(const char *server_address) {
 }
 
 void PIGrpcServerRun() {
-  PIGrpcServerRunAddrGnmi("0.0.0.0:50051", nullptr);
+  PIGrpcServerRunAddrGnmi("0.0.0.0:9559", nullptr);
 }
 
 int PIGrpcServerGetPort() {

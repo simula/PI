@@ -35,11 +35,15 @@ void PIGrpcServerInit();
 // configuration.
 void PIGrpcServerInitWithConfig(const char *config_text, const char *version);
 
+<<<<<<< HEAD
 // Set ForwardingPipelineConfig for dev_id statically.
 // It is necessary when someone wants to install ForwardingPipelineConfig via programming API instead of P4Runtime.
 int PIGrpcServerPipelineConfigSet(uint64_t dev_id, const char *config_bin, size_t data_size, void *p4info);
 
 // Start server and bind to default address (0.0.0.0:50051)
+=======
+// Start server and bind to default address (0.0.0.0:9559)
+>>>>>>> dreibh/debian-ubuntu-packaging
 void PIGrpcServerRun();
 
 // Start server and bind to given address (eg. localhost:1234,

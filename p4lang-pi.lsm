@@ -1,6 +1,6 @@
 Begin4
 Title:          p4lang-pi
-Version:        0.1.0+g202103242050~827907
+Version:        0.1.0
 Entered-date:   2021-03-24
 Description:    Protocol Independent API (PI or P4 Runtime) defines a set of
                 APIs that allow interacting with entities defined in a P4

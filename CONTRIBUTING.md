@@ -3,9 +3,20 @@ send us an email (p4-dev@lists.p4.org).
 
 ### Apache CLA
 
-All developers must sign the [P4.org](http://p4.org) CLA and return it to
-(membership@p4.org) before making contributions. The CLA is available
-[here](https://p4.org/assets/P4_Language_Consortium_Membership_Agreement.pdf).
+All developers must sign the [Open Networking Foundation (ONF)
+CLA](https://cla.opennetworking.org) before making contributions.
+
+### Inclusive Naming
+
+For symbol names and documentation, do not introduce new usage of harmful
+language such as 'master / slave' (or 'slave' independent of 'master') and
+'blacklist / whitelist'. For more information about what constitutes harmful
+language and for a reference word replacement list, please refer to the
+[Inclusive Naming Initiative](https://inclusivenaming.org/).
+
+We are committed to removing all harmful language from the project. If you
+detect existing usage of harmful language in code or documentation, please
+report the issue to us or open a Pull Request to address it directly. Thanks!
 
 ### Building locally
 
@@ -18,7 +29,7 @@ All contributed code must pass the style checker, which can be run with
 `./tools/check_style.sh`. If the style checker fails because of a C file, you
 can format this C file with `./tools/clang_format_check.py -s Google -i <file>`.
 
-CI uses clang-format-6.0 to validate the formatting of C files, which means that
+CI uses clang-format-8 to validate the formatting of C files, which means that
 your contribution may fail CI if you use a different version locally.
 
 ### Making changes to the PI internal API

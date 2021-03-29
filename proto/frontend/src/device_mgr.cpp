@@ -1,4 +1,5 @@
 /* Copyright 2013-present Barefoot Networks, Inc.
+ * Copyright 2020 VMware, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,7 +15,7 @@
  */
 
 /*
- * Antonin Bas (antonin@barefootnetworks.com)
+ * Antonin Bas
  *
  */
 
@@ -71,7 +72,8 @@ using Status = DeviceMgr::Status;
 using StreamMessageResponseCb = DeviceMgr::StreamMessageResponseCb;
 using Code = ::google::rpc::Code;
 using common::SessionTemp;
-using common::check_proto_bytestring;
+using common::bytestring_p4rt_to_pi;
+using common::bytestring_pi_to_p4rt;
 using common::make_invalid_p4_id_status;
 using action_profile_set_map =
   std::unordered_map<pi_indirect_handle_t, p4v1::ActionProfileActionSet>;
@@ -239,6 +241,54 @@ struct ConfigFile {
   size_t size{0};
 };
 
+// RAII wrapper around pi_table_fetch_res_t to enable proper cleanup in case of
+// failure.
+struct PIEntries {
+  explicit PIEntries(const SessionTemp &session)
+      : session(session) { }
+
+  ~PIEntries() {
+    if (_init) pi_table_entries_fetch_done(session.get(), res);
+  }
+
+  Status fetch(pi_dev_tgt_t device_tgt, pi_p4_id_t table_id) {
+    assert(!_init);
+    auto pi_status = pi_table_entries_fetch(
+        session.get(), device_tgt, table_id, &res);
+    if (pi_status != PI_STATUS_SUCCESS) {
+      RETURN_ERROR_STATUS(
+          Code::UNKNOWN, "Error when reading table entries from target");
+    }
+    _init = true;
+    RETURN_OK_STATUS();
+  }
+
+  Status fetch_one(pi_dev_tgt_t device_tgt, pi_p4_id_t table_id,
+                   const pi::MatchKey &mk) {
+    assert(!_init);
+    auto pi_status = pi_table_entries_fetch_wkey(
+        session.get(), device_tgt, table_id, mk.get(), &res);
+    if (pi_status != PI_STATUS_SUCCESS) {
+      RETURN_ERROR_STATUS(
+          Code::UNKNOWN, "Error when reading table entry from target");
+    }
+    _init = true;
+    RETURN_OK_STATUS();
+  }
+
+  operator pi_table_fetch_res_t *() const {
+    return res;
+  }
+
+  pi_table_fetch_res_t *operator->() const {
+    return res;
+  }
+
+  bool _init{false};
+  const SessionTemp &session;
+  pi_table_fetch_res_t *res{nullptr};
+};
+
 // RAII wrapper around pi_act_prof_fetch_res_tt to enable proper cleanup in case
 // of failure.
 struct PIActProfEntries {
@@ -365,8 +415,9 @@ class DeviceMgrImp {
       table_info_store.add_entry(
           t_id, match_key,
           TableInfoStore::Data(default_entry_handle,
-                               0  /* controller_metadata */,
-                               0  /* idle_timeout_ns */));
+                               0   /* controller_metadata */,
+                               ""  /* metadata */,
+                               0   /* idle_timeout_ns */));
 
       // if idle timeout is supported, set min TTL
       if (pi_p4info_table_supports_idle_timeout(p4info_new, t_id)) {
@@ -832,18 +883,21 @@ class DeviceMgrImp {
   Status direct_meter_read_one(const p4v1::TableEntry &table_entry,
                                const SessionTemp &session,
                                p4v1::ReadResponse *response) const {
+    auto table_id = table_entry.table_id();
+    p4_id_t table_direct_meter_id = pi_get_table_direct_resource_p4_id(
+        table_id, P4Ids::DIRECT_METER);
+    if (table_direct_meter_id == PI_INVALID_ID) {
+      RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT,
+                          "Table has no direct meters");
+    }
+
+    // read single direct meter entry
     if (!table_entry.match().empty() || table_entry.is_default_action()) {
       // also works for default entry, since the default entry is added to the
       // table info store (with the corect target-generated handle) in p4_change
       pi_entry_handle_t entry_handle = 0;
       RETURN_IF_ERROR(entry_handle_from_table_entry(
           table_entry, &entry_handle));
-      p4_id_t table_direct_meter_id = pi_get_table_direct_resource_p4_id(
-        table_entry.table_id(), P4Ids::DIRECT_METER);
-      if (table_direct_meter_id == PI_INVALID_ID) {
-        RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT,
-                            "Table has no direct meters");
-      }
       pi_meter_spec_t meter_spec;
       auto pi_status = pi_meter_read_direct(
           session.get(), device_tgt, table_direct_meter_id, entry_handle,
@@ -857,10 +911,47 @@ class DeviceMgrImp {
       meter_spec_pi_to_proto(meter_spec, entry->mutable_config());
       RETURN_OK_STATUS();
     }
-    // read all direct meters in table
-    RETURN_ERROR_STATUS(
-        Code::UNIMPLEMENTED,
-        "Reading ALL direct meters in a table is not supported yet");
+
+    // read all direct meters in table; in order to do that we choose to read
+    // all the table entries first, then extract direct meter values. As a
+    // result, a lot of this code is duplicated from table_read_one.
+    PIEntries entries(session);
+    RETURN_IF_ERROR(entries.fetch(device_tgt, table_id));
+    auto num_entries = pi_table_entries_num(entries);
+    pi_table_ma_entry_t pi_entry;
+    pi_entry_handle_t entry_handle;
+    pi::MatchKey mk(p4info.get(), table_id);
+    for (size_t i = 0; i < num_entries; i++) {
+      pi_table_entries_next(entries, &pi_entry, &entry_handle);
+
+      mk.from(pi_entry.match_key);
+
+      auto *entry = response->add_entities()->mutable_direct_meter_entry();
+      auto *tentry = entry->mutable_table_entry();
+      tentry->set_table_id(table_id);
+      RETURN_IF_ERROR(parse_match_key(p4info.get(), table_id, mk, tentry));
+
+      // direct resources
+      auto *direct_configs = pi_entry.entry.direct_res_config;
+      if (!direct_configs) {
+        RETURN_ERROR_STATUS(
+            Code::INTERNAL,
+            "Did not expect no direct resource for table entry");
+      }
+      for (size_t j = 0; j < direct_configs->num_configs; j++) {
+        const auto &config = direct_configs->configs[j];
+        if (config.res_id != table_direct_meter_id) continue;
+        meter_spec_pi_to_proto(
+            *static_cast<pi_meter_spec_t *>(config.config),
+            entry->mutable_config());
+      }
+      if (!entry->has_config()) {
+        RETURN_ERROR_STATUS(
+            Code::INTERNAL,
+            "Did not expect no direct meter for table entry");
+      }
+    }
+    RETURN_OK_STATUS();
   }
 
   Status direct_meter_read(const p4v1::DirectMeterEntry &meter_entry,
@@ -873,7 +964,7 @@ class DeviceMgrImp {
     const auto &table_entry = meter_entry.table_entry();
     if (table_entry.table_id() == 0) {
       RETURN_ERROR_STATUS(Code::UNIMPLEMENTED,
-        "Reading ALL direct meters for all tables is not supported yet");
+        "Reading all direct meters for ALL tables is not supported yet");
     }
     if (!check_p4_id(table_entry.table_id(), P4Ids::TABLE))
       return make_invalid_p4_id_status();
@@ -891,7 +982,9 @@ class DeviceMgrImp {
     for (size_t j = 0; j < num_params; j++) {
       auto param = action->add_params();
       param->set_param_id(param_ids[j]);
-      reader.get_arg(param_ids[j], param->mutable_value());
+      std::string value;
+      reader.get_arg(param_ids[j], &value);
+      param->set_value(bytestring_pi_to_p4rt(value));
     }
     RETURN_OK_STATUS();
   }
@@ -1017,7 +1110,7 @@ class DeviceMgrImp {
           RETURN_ERROR_STATUS(Code::INTERNAL, "Invalid member handle in group");
         ap_action->mutable_action()->CopyFrom(action_spec_it->second);
         ap_action->set_weight(member.weight);
-        ap_action->set_watch(member.watch);
+        member.watch.to_p4rt(ap_action);
       }
     }
 
@@ -1156,6 +1249,7 @@ class DeviceMgrImp {
           Code::INTERNAL, "Cannot find default entry in table info store");
     }
     table_entry->set_controller_metadata(entry_data->controller_metadata);
+    table_entry->set_metadata(entry_data->metadata);
 
     RETURN_OK_STATUS();
   }
@@ -1167,54 +1261,6 @@ class DeviceMgrImp {
     if (requested_entry.is_default_action()) {
       return table_read_default(table_id, requested_entry, session, response);
     }
-
-    // RAII wrapper around pi_table_fetch_res_t to enable proper cleanup in case
-    // of failure.
-    struct PIEntries {
-      explicit PIEntries(const SessionTemp &session)
-          : session(session) { }
-
-      ~PIEntries() {
-        if (_init) pi_table_entries_fetch_done(session.get(), res);
-      }
-
-      Status fetch(pi_dev_tgt_t device_tgt, pi_p4_id_t table_id) {
-        assert(!_init);
-        auto pi_status = pi_table_entries_fetch(
-            session.get(), device_tgt, table_id, &res);
-        if (pi_status != PI_STATUS_SUCCESS) {
-          RETURN_ERROR_STATUS(
-              Code::UNKNOWN, "Error when reading table entries from target");
-        }
-        _init = true;
-        RETURN_OK_STATUS();
-      }
-
-      Status fetch_one(pi_dev_tgt_t device_tgt, pi_p4_id_t table_id,
-                       const pi::MatchKey &mk) {
-        assert(!_init);
-        auto pi_status = pi_table_entries_fetch_wkey(
-            session.get(), device_tgt, table_id, mk.get(), &res);
-        if (pi_status != PI_STATUS_SUCCESS) {
-          RETURN_ERROR_STATUS(
-              Code::UNKNOWN, "Error when reading table entry from target");
-        }
-        _init = true;
-        RETURN_OK_STATUS();
-      }
-
-      operator pi_table_fetch_res_t *() const {
-        return res;
-      }
-
-      pi_table_fetch_res_t *operator->() const {
-        return res;
-      }
-
-      bool _init{false};
-      const SessionTemp &session;
-      pi_table_fetch_res_t *res{nullptr};
-    };
 
     bool table_supports_idle_timeout = pi_p4info_table_supports_idle_timeout(
         p4info.get(), table_id);
@@ -1287,6 +1333,7 @@ class DeviceMgrImp {
                             "Table state out-of-sync with target");
       }
       table_entry->set_controller_metadata(entry_data->controller_metadata);
+      table_entry->set_metadata(entry_data->metadata);
       table_entry->set_idle_timeout_ns(entry_data->idle_timeout_ns);
 
       if (requested_entry.has_time_since_last_hit()) {
@@ -1499,7 +1546,7 @@ class DeviceMgrImp {
       // have a flag to choose one or the other).
       std::map<ActionProfMemberId, int> member_weights;
       int weight;
-      int watch_port;
+      WatchPort watch_port;
       for (size_t j = 0; j < num; j++) {
         ActionProfMemberId member_id;
         if (!access_manual->retrieve_member_id(members_h[j], &member_id)) {
@@ -1516,7 +1563,7 @@ class DeviceMgrImp {
         auto member = group->add_members();
         member->set_member_id(m.first);
         member->set_weight(m.second);
-        member->set_watch(watch_port);
+        watch_port.to_p4rt(member);
       }
     }
 
@@ -1752,18 +1799,21 @@ class DeviceMgrImp {
   Status direct_counter_read_one(const p4v1::TableEntry &table_entry,
                                  const SessionTemp &session,
                                  p4v1::ReadResponse *response) const {
+    auto table_id =  table_entry.table_id();
+    p4_id_t table_direct_counter_id = pi_get_table_direct_resource_p4_id(
+        table_id, P4Ids::DIRECT_COUNTER);
+    if (table_direct_counter_id == PI_INVALID_ID) {
+      RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT,
+                          "Table has no direct counters");
+    }
+
+    // read single direct counter entry
     if (!table_entry.match().empty() || table_entry.is_default_action()) {
       // also works for default entry, since the default entry is added to the
       // table info store (with the corect target-generated handle) in p4_change
       pi_entry_handle_t entry_handle = 0;
       RETURN_IF_ERROR(entry_handle_from_table_entry(
           table_entry, &entry_handle));
-      p4_id_t table_direct_counter_id = pi_get_table_direct_resource_p4_id(
-        table_entry.table_id(), P4Ids::DIRECT_COUNTER);
-      if (table_direct_counter_id == PI_INVALID_ID) {
-        RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT,
-                            "Table has no direct counters");
-      }
       pi_counter_data_t counter_data;
       auto pi_status = pi_counter_read_direct(
           session.get(), device_tgt, table_direct_counter_id, entry_handle,
@@ -1777,10 +1827,47 @@ class DeviceMgrImp {
       counter_data_pi_to_proto(counter_data, entry->mutable_data());
       RETURN_OK_STATUS();
     }
-    // read all direct counters in table
-    RETURN_ERROR_STATUS(
-        Code::UNIMPLEMENTED,
-        "Reading ALL direct counters in a table is not supported yet");
+
+    // read all direct counters in table; in order to do that we choose to read
+    // all the table entries first, then extract direct counter values. As a
+    // result, a lot of this code is duplicated from table_read_one.
+    PIEntries entries(session);
+    RETURN_IF_ERROR(entries.fetch(device_tgt, table_id));
+    auto num_entries = pi_table_entries_num(entries);
+    pi_table_ma_entry_t pi_entry;
+    pi_entry_handle_t entry_handle;
+    pi::MatchKey mk(p4info.get(), table_id);
+    for (size_t i = 0; i < num_entries; i++) {
+      pi_table_entries_next(entries, &pi_entry, &entry_handle);
+
+      mk.from(pi_entry.match_key);
+
+      auto *entry = response->add_entities()->mutable_direct_counter_entry();
+      auto *tentry = entry->mutable_table_entry();
+      tentry->set_table_id(table_id);
+      RETURN_IF_ERROR(parse_match_key(p4info.get(), table_id, mk, tentry));
+
+      // direct resources
+      auto *direct_configs = pi_entry.entry.direct_res_config;
+      if (!direct_configs) {
+        RETURN_ERROR_STATUS(
+            Code::INTERNAL,
+            "Did not expect no direct resource for table entry");
+      }
+      for (size_t j = 0; j < direct_configs->num_configs; j++) {
+        const auto &config = direct_configs->configs[j];
+        if (config.res_id != table_direct_counter_id) continue;
+        counter_data_pi_to_proto(
+            *static_cast<pi_counter_data_t *>(config.config),
+            entry->mutable_data());
+      }
+      if (!entry->has_data()) {
+        RETURN_ERROR_STATUS(
+            Code::INTERNAL,
+            "Did not expect no direct counter for table entry");
+      }
+    }
+    RETURN_OK_STATUS();
   }
 
   Status direct_counter_read(const p4v1::DirectCounterEntry &counter_entry,
@@ -1794,7 +1881,7 @@ class DeviceMgrImp {
     if (table_entry.table_id() == 0) {
       RETURN_ERROR_STATUS(
           Code::UNIMPLEMENTED,
-          "Reading ALL direct counters for all tables is not supported yet");
+          "Reading all direct counters for ALL tables is not supported yet");
     }
     if (!check_p4_id(table_entry.table_id(), P4Ids::TABLE))
       return make_invalid_p4_id_status();
@@ -2123,19 +2210,34 @@ class DeviceMgrImp {
     return nullptr;
   }
 
-  Status validate_exact_match(const p4v1::FieldMatch::Exact &mf,
-                              size_t bitwidth) const {
-    if (check_proto_bytestring(mf.value(), bitwidth) != Code::OK)
-      RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT, "Invalid bytestring format");
+  Status set_valid_match(pi::MatchKey *match_key,
+                         pi_p4_id_t mf_id,
+                         const p4v1::FieldMatch::Exact &mf,
+                         size_t bitwidth) const {
+    ASSIGN_OR_RETURN(auto value, bytestring_p4rt_to_pi(mf.value(), bitwidth));
+    // For backward-compatibility with old workflow. A P4_14 valid match type is
+    // replaced by an exact match in the P4Info, which is why we read the value
+    // from the exact field in the P4Runtime message ('\x00' means invalid and
+    // every other value means valid).
+    match_key->set_valid(mf_id, value != std::string("\x00", 1));
     RETURN_OK_STATUS();
   }
 
-  Status validate_lpm_match(const p4v1::FieldMatch::LPM &mf,
-                            size_t bitwidth) const {
-    const auto &value = mf.value();
+  Status set_exact_match(pi::MatchKey *match_key,
+                         pi_p4_id_t mf_id,
+                         const p4v1::FieldMatch::Exact &mf,
+                         size_t bitwidth) const {
+    ASSIGN_OR_RETURN(auto value, bytestring_p4rt_to_pi(mf.value(), bitwidth));
+    match_key->set_exact(mf_id, value.data(), value.size());
+    RETURN_OK_STATUS();
+  }
+
+  Status set_lpm_match(pi::MatchKey *match_key,
+                       pi_p4_id_t mf_id,
+                       const p4v1::FieldMatch::LPM &mf,
+                       size_t bitwidth) const {
+    ASSIGN_OR_RETURN(auto value, bytestring_p4rt_to_pi(mf.value(), bitwidth));
     const auto pLen = mf.prefix_len();
-    if (check_proto_bytestring(value, bitwidth) != Code::OK)
-      RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT, "Invalid bytestring format");
     if (pLen < 0) {
       RETURN_ERROR_STATUS(
           Code::INVALID_ARGUMENT, "Prefix length cannot be < 0");
@@ -2156,17 +2258,16 @@ class DeviceMgrImp {
           Code::INVALID_ARGUMENT,
           "Invalid LPM value, incorrect number of trailing zeros");
     }
+    match_key->set_lpm(mf_id, value.data(), value.size(), pLen);
     RETURN_OK_STATUS();
   }
 
-  Status validate_ternary_match(const p4v1::FieldMatch::Ternary &mf,
-                                size_t bitwidth) const {
-    const auto &value = mf.value();
-    const auto &mask = mf.mask();
-    if (check_proto_bytestring(value, bitwidth) != Code::OK)
-      RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT, "Invalid bytestring format");
-    if (check_proto_bytestring(mask, bitwidth) != Code::OK)
-      RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT, "Invalid bytestring format");
+  Status set_ternary_match(pi::MatchKey *match_key,
+                           pi_p4_id_t mf_id,
+                           const p4v1::FieldMatch::Ternary &mf,
+                           size_t bitwidth) const {
+    ASSIGN_OR_RETURN(auto value, bytestring_p4rt_to_pi(mf.value(), bitwidth));
+    ASSIGN_OR_RETURN(auto mask, bytestring_p4rt_to_pi(mf.mask(), bitwidth));
     // makes sure that mask is not 0 (otherwise mf should be omitted)
     if (ternary_match_is_dont_care(mf)) {
       RETURN_ERROR_STATUS(
@@ -2184,17 +2285,16 @@ class DeviceMgrImp {
             "Invalid ternary value, make sure value & mask == value");
       }
     }
+    match_key->set_ternary(mf_id, value.data(), mask.data(), value.size());
     RETURN_OK_STATUS();
   }
 
-  Status validate_range_match(const p4v1::FieldMatch::Range &mf,
-                              size_t bitwidth) const {
-    const auto &low = mf.low();
-    const auto &high = mf.high();
-    if (check_proto_bytestring(low, bitwidth) != Code::OK)
-      RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT, "Invalid bytestring format");
-    if (check_proto_bytestring(high, bitwidth) != Code::OK)
-      RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT, "Invalid bytestring format");
+  Status set_range_match(pi::MatchKey *match_key,
+                         pi_p4_id_t mf_id,
+                         const p4v1::FieldMatch::Range &mf,
+                         size_t bitwidth) const {
+    ASSIGN_OR_RETURN(auto low, bytestring_p4rt_to_pi(mf.low(), bitwidth));
+    ASSIGN_OR_RETURN(auto high, bytestring_p4rt_to_pi(mf.high(), bitwidth));
     assert(low.size() == high.size());
     if (range_match_is_dont_care(mf)) {
       RETURN_ERROR_STATUS(
@@ -2207,82 +2307,17 @@ class DeviceMgrImp {
         RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT,
                             "Invalid range value, make sure low <= high");
     }
+    match_key->set_range(mf_id, low.data(), high.data(), low.size());
     RETURN_OK_STATUS();
   }
 
-  Status validate_optional_match(const p4v1::FieldMatch::Optional &mf,
-                                 size_t bitwidth) const {
-    if (check_proto_bytestring(mf.value(), bitwidth) != Code::OK)
-      RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT, "Invalid bytestring format");
-    RETURN_OK_STATUS();
-  }
-
-  Status validate_match_key(const p4v1::TableEntry &entry) const {
-    auto t_id = entry.table_id();
-    size_t num_match_fields;
-    auto expected_mf_ids = pi_p4info_table_get_match_fields(
-        p4info.get(), t_id, &num_match_fields);
-    if (static_cast<size_t>(entry.match().size()) > num_match_fields) {
-      RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT,
-                          "Too many fields in match key");
-    }
-
-    int num_mf_matched = 0;  // check if some extra fields in the match key
-    // the double loop is potentially too slow; refactor this code if it proves
-    // to be a bottleneck
-    for (size_t i = 0; i < num_match_fields; i++) {
-      auto mf_id = expected_mf_ids[i];
-      auto mf_info = pi_p4info_table_match_field_info(p4info.get(), t_id, i);
-      auto mf = find_mf(entry, mf_id);
-      bool can_be_omitted = (mf_info->match_type == PI_P4INFO_MATCH_TYPE_LPM) ||
-          (mf_info->match_type == PI_P4INFO_MATCH_TYPE_TERNARY) ||
-          (mf_info->match_type == PI_P4INFO_MATCH_TYPE_RANGE) ||
-          (mf_info->match_type == PI_P4INFO_MATCH_TYPE_OPTIONAL);
-      if (mf == nullptr && !can_be_omitted) {
-        RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT,
-                            "Missing non-ternary field in match key");
-      }
-      if (mf == nullptr) continue;
-      num_mf_matched++;
-      auto bitwidth = mf_info->bitwidth;
-      switch (mf_info->match_type) {
-        // For backward-compatibility with old workflow. A P4_14 valid match
-        // type is replaced by an exact match in the P4Info, which is why we
-        // check that the P4Runtime message includes an exact field in that
-        // case.
-        case PI_P4INFO_MATCH_TYPE_VALID:
-        case PI_P4INFO_MATCH_TYPE_EXACT:
-          if (!mf->has_exact())
-            RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT, "Invalid match type");
-          RETURN_IF_ERROR(validate_exact_match(mf->exact(), bitwidth));
-          break;
-        case PI_P4INFO_MATCH_TYPE_LPM:
-          if (!mf->has_lpm())
-            RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT, "Invalid match type");
-          RETURN_IF_ERROR(validate_lpm_match(mf->lpm(), bitwidth));
-          break;
-        case PI_P4INFO_MATCH_TYPE_TERNARY:
-          if (!mf->has_ternary())
-            RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT, "Invalid match type");
-          RETURN_IF_ERROR(validate_ternary_match(mf->ternary(), bitwidth));
-          break;
-        case PI_P4INFO_MATCH_TYPE_RANGE:
-          if (!mf->has_range())
-            RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT, "Invalid match type");
-          RETURN_IF_ERROR(validate_range_match(mf->range(), bitwidth));
-          break;
-        case PI_P4INFO_MATCH_TYPE_OPTIONAL:
-          if (!mf->has_optional())
-            RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT, "Invalid match type");
-          RETURN_IF_ERROR(validate_optional_match(mf->optional(), bitwidth));
-          break;
-        default:
-          assert(0);
-          break;
-      }
-    }
-    if (num_mf_matched != entry.match().size())
-      RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT, "Unknown field in match key");
+  Status set_optional_match(pi::MatchKey *match_key,
+                            pi_p4_id_t mf_id,
+                            const p4v1::FieldMatch::Optional &mf,
+                            size_t bitwidth) const {
+    ASSIGN_OR_RETURN(auto value, bytestring_p4rt_to_pi(mf.value(), bitwidth));
+    match_key->set_optional(
+        mf_id, value.data(), value.size(), false /* is_wildcard */);
     RETURN_OK_STATUS();
   }
 
@@ -2300,14 +2335,19 @@ class DeviceMgrImp {
       match_key->set_is_default(true);
       RETURN_OK_STATUS();
     }
-    RETURN_IF_ERROR(validate_match_key(entry));
     auto t_id = entry.table_id();
     bool need_priority = false;
     size_t num_match_fields;
     auto expected_mf_ids = pi_p4info_table_get_match_fields(
         p4info.get(), t_id, &num_match_fields);
-    // same as for validate_match_key above: refactor if double loop too
-    // expensive
+    if (static_cast<size_t>(entry.match().size()) > num_match_fields) {
+      RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT,
+                          "Too many fields in match key");
+    }
+
+    int num_mf_matched = 0;  // check if some extra fields in the match key
+    // the double loop is potentially too slow; refactor this code if it proves
+    // to be a bottleneck
     for (size_t i = 0; i < num_match_fields; i++) {
       auto mf_id = expected_mf_ids[i];
       auto mf_info = pi_p4info_table_match_field_info(p4info.get(), t_id, i);
@@ -2316,39 +2356,50 @@ class DeviceMgrImp {
           (mf_info->match_type == PI_P4INFO_MATCH_TYPE_RANGE) ||
           (mf_info->match_type == PI_P4INFO_MATCH_TYPE_OPTIONAL);
       auto mf = find_mf(entry, mf_id);
+
       if (mf != nullptr) {
+        num_mf_matched++;
+        auto bitwidth = mf_info->bitwidth;
         switch (mf_info->match_type) {
           // For backward-compatibility with old workflow. A P4_14 valid match
           // type is replaced by an exact match in the P4Info, which is why we
           // read the value from the exact field in the P4Runtime message
           // ('\x00' means invalid and every other value means valid).
           case PI_P4INFO_MATCH_TYPE_VALID:
-            match_key->set_valid(mf_id,
-                                 mf->exact().value() != std::string("\x00", 1));
+            if (!mf->has_exact())
+              RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT, "Invalid match type");
+            RETURN_IF_ERROR(
+                set_valid_match(match_key, mf_id, mf->exact(), bitwidth));
             break;
           case PI_P4INFO_MATCH_TYPE_EXACT:
-            match_key->set_exact(mf_id, mf->exact().value().data(),
-                                 mf->exact().value().size());
+            if (!mf->has_exact())
+              RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT, "Invalid match type");
+            RETURN_IF_ERROR(
+                set_exact_match(match_key, mf_id, mf->exact(), bitwidth));
             break;
           case PI_P4INFO_MATCH_TYPE_LPM:
-            match_key->set_lpm(mf_id, mf->lpm().value().data(),
-                               mf->lpm().value().size(),
-                               mf->lpm().prefix_len());
+            if (!mf->has_lpm())
+              RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT, "Invalid match type");
+            RETURN_IF_ERROR(
+                set_lpm_match(match_key, mf_id, mf->lpm(), bitwidth));
             break;
           case PI_P4INFO_MATCH_TYPE_TERNARY:
-            match_key->set_ternary(mf_id, mf->ternary().value().data(),
-                                   mf->ternary().mask().data(),
-                                   mf->ternary().value().size());
+            if (!mf->has_ternary())
+              RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT, "Invalid match type");
+            RETURN_IF_ERROR(
+                set_ternary_match(match_key, mf_id, mf->ternary(), bitwidth));
             break;
           case PI_P4INFO_MATCH_TYPE_RANGE:
-            match_key->set_range(mf_id, mf->range().low().data(),
-                                 mf->range().high().data(),
-                                 mf->range().low().size());
+            if (!mf->has_range())
+              RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT, "Invalid match type");
+            RETURN_IF_ERROR(
+                set_range_match(match_key, mf_id, mf->range(), bitwidth));
             break;
           case PI_P4INFO_MATCH_TYPE_OPTIONAL:
-            match_key->set_optional(mf_id, mf->optional().value().data(),
-                                    mf->optional().value().size(),
-                                    false /* is_wildcard */);
+            if (!mf->has_optional())
+              RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT, "Invalid match type");
+            RETURN_IF_ERROR(
+                set_optional_match(match_key, mf_id, mf->optional(), bitwidth));
             break;
           default:
             assert(0);
@@ -2370,11 +2421,13 @@ class DeviceMgrImp {
                                  nbytes);
             break;
           default:
-            assert(0);  // cannot reach this because of validate method call
-            break;
+            RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT,
+                                "Missing non-ternary field in match key");
         }
       }
     }
+    if (num_mf_matched != entry.match().size())
+      RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT, "Unknown field in match key");
     if (!need_priority && entry.priority() > 0) {
       RETURN_ERROR_STATUS(Code::INVALID_ARGUMENT,
                           "Non-zero priority for non-ternary match");
@@ -2451,13 +2504,10 @@ class DeviceMgrImp {
   Status construct_action_data(uint32_t table_id, const p4v1::Action &action,
                                pi::ActionEntry *action_entry) const {
     (void) table_id;
-    RETURN_IF_ERROR(validate_action_data(p4info.get(), action));
     action_entry->init_action_data(p4info.get(), action.action_id());
     auto action_data = action_entry->mutable_action_data();
-    for (const auto &p : action.params()) {
-      action_data->set_arg(p.param_id(), p.value().data(), p.value().size());
-    }
-    RETURN_OK_STATUS();
+    return ::pi::fe::proto::construct_action_data(
+        p4info.get(), action, action_data);
   }
 
   Status construct_action_entry_indirect(uint32_t table_id,
@@ -2661,14 +2711,18 @@ class DeviceMgrImp {
         p4v1::TableAction::kActionProfileActionSet) {
       table_info_store.add_entry(
           table_id, match_key,
-          TableInfoStore::Data(handle, table_entry.controller_metadata(),
+          TableInfoStore::Data(handle,
+                               table_entry.controller_metadata(),
+                               table_entry.metadata(),
                                table_entry.idle_timeout_ns(),
                                action_entry.indirect_handle()));
       session->cleanup_scope_pop();
     } else {
       table_info_store.add_entry(
           table_id, match_key,
-          TableInfoStore::Data(handle, table_entry.controller_metadata(),
+          TableInfoStore::Data(handle,
+                               table_entry.controller_metadata(),
+                               table_entry.metadata(),
                                table_entry.idle_timeout_ns()));
     }
 
@@ -2742,9 +2796,11 @@ class DeviceMgrImp {
       // cannot be false as the function returns early with an error otherwise
       assert(table_entry.is_default_action());
       entry_data->controller_metadata = 0;
+      entry_data->metadata = "";
       entry_data->idle_timeout_ns = 0;
     } else {
       entry_data->controller_metadata = table_entry.controller_metadata();
+      entry_data->metadata = table_entry.metadata();
       entry_data->idle_timeout_ns = table_entry.idle_timeout_ns();
       if (table_entry.action().type_case() ==
           p4v1::TableAction::kActionProfileActionSet) {

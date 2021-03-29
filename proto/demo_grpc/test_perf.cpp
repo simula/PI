@@ -13,7 +13,7 @@
 
 #include <arpa/inet.h>
 
-#include <grpc++/grpc++.h>
+#include <grpcpp/grpcpp.h>
 
 #include "PI/proto/p4info_to_and_from_proto.h"  // for p4info_serialize_to_proto
 
@@ -310,7 +310,7 @@ class Tester {
 int main(int argc, char** argv) {
   if (parse_opts(argc, argv) != 0) return 1;
   auto channel = grpc::CreateChannel(
-      "localhost:50051", grpc::InsecureChannelCredentials());
+      "localhost:9559", grpc::InsecureChannelCredentials());
 
   pi_p4info_t *p4info;
   pi_add_config_from_file(opt_config_path, PI_CONFIG_TYPE_BMV2_JSON, &p4info);
