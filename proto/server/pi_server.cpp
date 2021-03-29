@@ -41,9 +41,6 @@
 #include "uint128.h"
 
 #include "PI/proto/pi_server.h"
-#include "PI/proto/p4info_to_and_from_proto.h"
-//
-#include "p4/tmp/p4config.grpc.pb.h"
 
 using grpc::Server;
 using grpc::ServerBuilder;
@@ -632,33 +629,6 @@ void PIGrpcServerInitWithConfig(const char *config_text, const char *version) {
   auto status = DeviceMgr::init(config_text, version);
   (void) status;
   assert(status.code() == ::google::rpc::Code::OK);
-}
-
-int PIGrpcServerPipelineConfigSet(uint64_t dev_id, const char *config_bin, size_t data_size, void *p4info) {
-
-
-    auto device = ::pi::server::Devices::get(dev_id);
-
-    ::p4::config::v1::P4Info p4info_proto;
-    p4info_proto = ::pi::p4info::p4info_serialize_to_proto((pi_p4info_t*) p4info);
-
-    p4v1::ForwardingPipelineConfig config;
-    config.set_allocated_p4info(&p4info_proto);
-    config.set_p4_device_config(config_bin, data_size);
-
-    auto device_mgr = device->get_or_add_p4_mgr();
-    auto status = device_mgr->pipeline_config_set(
-            p4v1::SetForwardingPipelineConfigRequest_Action_VERIFY_AND_COMMIT,
-            config);
-
-    config.release_p4info();
-    config.release_p4_device_config();
-
-    if (status.code() != ::google::rpc::Code::OK) {
-        return PI_STATUS_INVALID_CONFIG_TYPE;
-    }
-
-    return PI_STATUS_SUCCESS;
 }
 
 void PIGrpcServerRunAddrGnmi(const char *server_address, void *gnmi_service) {

@@ -2,15 +2,12 @@ ACLOCAL_AMFLAGS = ${ACLOCAL_FLAGS} -I m4
 
 AM_CPPFLAGS = \
 -I$(top_srcdir)/frontend \
-<<<<<<< HEAD
 -I$(top_builddir)/cpp_out \
 -I$(top_srcdir)/../include \
 -I$(top_srcdir)/p4info \
--I$(top_builddir)/grpc_out
-=======
+-I$(top_builddir)/grpc_out \
 -isystem $(top_builddir)/cpp_out \
 -isystem $(top_builddir)/grpc_out
->>>>>>> dreibh/debian-ubuntu-packaging
 
 if WITH_SYSREPO
 AM_CPPFLAGS += -DWITH_SYSREPO
@@ -42,12 +39,8 @@ $(top_builddir)/frontend/libpifeproto.la \
 $(top_builddir)/p4info/libpiconvertproto.la \
 $(top_builddir)/libpiprotogrpc.la \
 $(top_builddir)/libpiprotobuf.la \
-<<<<<<< HEAD
 $(top_builddir)/../src/libpip4info.la \
-$(PROTOBUF_LIBS) $(GRPC_LIBS)
-=======
 $(PROTOBUF_LIBS) $(GRPC_LIBS) \
 $(BOOST_THREAD_LIB) $(BOOST_SYSTEM_LIB)
->>>>>>> dreibh/debian-ubuntu-packaging
 # causes issue with libpiproto as it includes a version of google.rpc.Status
 # -lgrpc++_error_details
